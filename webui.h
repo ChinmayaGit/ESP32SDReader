@@ -304,7 +304,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <section id="settingsTab" class="panel" hidden>
     <form class="form" id="settingsForm">
-      <div class="hint">Hotspot stays at <b>http://192.168.4.1</b>. After a power cycle, if the saved home Wi-Fi is missing, the hotspot turns on automatically so you can still connect. If you also join home Wi-Fi, you can use that IP or <b>http://esp32-sd.local</b>.</div>
+      <div class="hint">Hotspot page: <b>http://192.168.4.1</b> — only while your phone is on this ESP32 Wi-Fi. After joining home Wi-Fi, switch your phone to that network and open the LAN address (shown on the Files page). <b>http://192.168.4.1 will not work from home Wi-Fi.</b> If the LAN page times out, the router is blocking device-to-device (common on Airtel / guest Wi-Fi). Turn off AP isolation, or stay on the hotspot.</div>
       <div>
         <div class="hint" style="margin-bottom:8px">Wi-Fi mode</div>
         <div class="mode-row">
@@ -374,11 +374,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button class="btn" id="closeConnect">Close</button>
   </div>
   <div class="preview-body">
+    <div class="link-row" id="lanRow" hidden>
+      <span>Home Wi-Fi</span>
+      <code id="lanLink">http://</code>
+      <button class="btn" type="button" id="copyLanBtn">Copy</button>
+    </div>
     <div class="link-row">
       <span>FTP</span>
       <code id="ftpLink">ftp://192.168.4.1:21</code>
       <button class="btn" type="button" id="copyFtpBtn">Copy</button>
     </div>
+    <div class="hint">Use FileZilla or Cyberduck. Close this web page first. Connect to the same Wi-Fi you will use for FTP, then use that network’s IP (hotspot <b>192.168.4.1</b> or the home Wi-Fi address). Finder and the iOS Files app often fail.</div>
     <div class="link-row">
       <span>VLC HTTP</span>
       <code id="vlcLink">http://192.168.4.1/media/</code>
@@ -546,10 +552,10 @@ function setSort(next) {
 }
 
 function ftpUri() {
-  const ip = statusData.ip || "192.168.4.1";
+  const host = location.hostname || statusData.ip || "192.168.4.1";
   const user = statusData.ftpUser || "sd";
   const pass = statusData.ftpPass || "sdreader1";
-  return "ftp://" + user + ":" + pass + "@" + ip + ":21";
+  return "ftp://" + user + ":" + pass + "@" + host + ":21";
 }
 
 function ftpFileUrl(name) {
@@ -732,11 +738,17 @@ async function openConnect() {
   $("#wifiSsid").textContent = statusData.ssid || "ESP32-SD";
   $("#wifiPass").textContent = statusData.wifiPass || "(open)";
   $("#webUrl").textContent = statusData.web || ("http://" + ip);
-  $("#ftpHost").textContent = ip;
+  $("#ftpHost").textContent = location.hostname || ip;
   $("#ftpUser").textContent = statusData.ftpUser || "sd";
   $("#ftpPass").textContent = statusData.ftpPass || "sdreader1";
   $("#ftpLink").textContent = ftpUri();
   $("#vlcLink").textContent = "http://" + ip + "/v.mp4?path=/";
+  if (statusData.staConnected && statusData.staIp) {
+    $("#lanRow").hidden = false;
+    $("#lanLink").textContent = statusData.webLan || ("http://" + statusData.staIp);
+  } else {
+    $("#lanRow").hidden = true;
+  }
   $("#connectDlg").showModal();
   try {
     await Promise.all([
@@ -793,7 +805,7 @@ async function loadStatus() {
     if (sub) sub.textContent = "Home Wi-Fi not found. Connect to hotspot " + (statusData.ssid || "ESP32-SD") + " then open http://192.168.4.1";
   } else if (statusData.staConnected) {
     sta.textContent = "Joined " + statusData.staSsid + " · " + statusData.staIp;
-    if (sub) sub.textContent = "Connect to this hotspot, then browse the card in your browser.";
+    if (sub) sub.textContent = "On \"" + statusData.staSsid + "\" open http://" + statusData.staIp + "  ·  Hotspot stays at http://192.168.4.1";
   } else if (statusData.staSsid) {
     sta.textContent = "Not connected to " + statusData.staSsid;
     if (sub) sub.textContent = "Connect to this hotspot, then browse the card in your browser.";
@@ -1107,6 +1119,7 @@ document.addEventListener("keydown", (e) => {
 $("#connectBtn").onclick = openConnect;
 $("#closeConnect").onclick = () => $("#connectDlg").close();
 $("#copyFtpBtn").onclick = () => copyText($("#ftpLink").textContent, "FTP link copied");
+$("#copyLanBtn").onclick = () => copyText($("#lanLink").textContent, "Home Wi-Fi link copied");
 $("#copyVlcBtn").onclick = () => copyText($("#vlcLink").textContent, "VLC HTTP copied");
 $("#copyFtpDlgBtn").onclick = () => copyText(ftpUri(), "FTP link copied");
 $("#copyWifiBtn").onclick = () => copyText(statusData.wifiPass || "", "Password copied");

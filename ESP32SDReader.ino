@@ -392,6 +392,7 @@ bool joinStation() {
     Serial.printf("Wi-Fi \"%s\" not found\n", staSsid.c_str());
     return false;
   }
+  WiFi.setHostname("esp32-sd");
   WiFi.begin(staSsid.c_str(), staPass.c_str());
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
@@ -403,13 +404,36 @@ bool joinStation() {
     WiFi.disconnect(false, true);
     return false;
   }
+  start = millis();
+  while ((uint32_t)WiFi.localIP() == 0 && millis() - start < 3000) {
+    delay(50);
+    yield();
+  }
   return true;
+}
+
+void startMdns() {
+  MDNS.end();
+  if (!MDNS.begin("esp32-sd")) {
+    Serial.println("mDNS failed");
+    return;
+  }
+  MDNS.setInstanceName("ESP32 SD Reader");
+  MDNS.addService("http", "tcp", 80);
+  MDNS.addService("ftp", "tcp", 21);
+}
+
+void startHttp() {
+  server.close();
+  delay(20);
+  server.begin();
 }
 
 void startWifi() {
   hotspotFallback = false;
   WiFi.persistent(false);
   WiFi.setSleep(false);
+  WiFi.setHostname("esp32-sd");
   WiFi.disconnect(true, true);
   delay(50);
 
@@ -437,7 +461,7 @@ void startWifi() {
 
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   esp_wifi_set_ps(WIFI_PS_NONE);
-  MDNS.begin("esp32-sd");
+  startMdns();
   Serial.println();
   Serial.printf("Wi-Fi mode: %s%s\n", wifiMode.c_str(),
                 hotspotFallback ? " (hotspot fallback)" : "");
@@ -448,18 +472,41 @@ void startWifi() {
     Serial.printf("  Open:     http://%s\n", WiFi.softAPIP().toString().c_str());
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("Joined Wi-Fi %s  http://%s\n", staSsid.c_str(), WiFi.localIP().toString().c_str());
+    Serial.printf("Joined Wi-Fi %s\n", staSsid.c_str());
+    Serial.printf("  On that network open: http://%s\n", WiFi.localIP().toString().c_str());
+    Serial.println("  (http://192.168.4.1 only works while you are on the ESP32 hotspot)");
   }
   Serial.println("  mDNS:     http://esp32-sd.local");
 }
 
+String requestHostIp() {
+  IPAddress lip = server.client().localIP();
+  if ((uint32_t)lip != 0) return lip.toString();
+  if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
+  return WiFi.softAPIP().toString();
+}
+
+void onFtpEvent(FtpOperation op, uint32_t, uint32_t) {
+  if (op == FTP_CONNECT) Serial.println("FTP client connected");
+  else if (op == FTP_DISCONNECT) Serial.println("FTP client disconnected");
+}
+
 void startFtp() {
   if (!sdReady) return;
+  ftpSrv.end();
+  delay(20);
+  ftpSrv.setCallback(onFtpEvent);
   ftpSrv.begin(FTP_USER, FTP_PASS);
-  IPAddress ip = hotspotOn() ? WiFi.softAPIP() : WiFi.localIP();
+  IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
   if ((uint32_t)ip == 0) ip = WiFi.softAPIP();
   ftpSrv.setLocalIp(ip);
-  Serial.printf("FTP server started  ftp://%s:%s@%s:21\n", FTP_USER, FTP_PASS, ip.toString().c_str());
+  Serial.printf("FTP server started\n");
+  if (hotspotOn()) {
+    Serial.printf("  Hotspot: ftp://%s:%s@%s:21\n", FTP_USER, FTP_PASS, WiFi.softAPIP().toString().c_str());
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("  Home Wi-Fi: ftp://%s:%s@%s:21\n", FTP_USER, FTP_PASS, WiFi.localIP().toString().c_str());
+  }
 }
 
 String wifiQrPayload() {
@@ -505,11 +552,11 @@ void handleQr() {
     text += ":";
     text += FTP_PASS;
     text += "@";
-    text += WiFi.softAPIP().toString();
+    text += requestHostIp();
     text += ":21";
   } else {
     text = "http://";
-    text += WiFi.softAPIP().toString();
+    text += requestHostIp();
   }
 
   qrBits = "";
@@ -562,8 +609,12 @@ void handleStatus() {
   body += ",\"ssid\":\"" + jsonEscape(apSsid) + "\"";
   body += ",\"wifiPass\":\"" + jsonEscape(apPass) + "\"";
   body += ",\"web\":\"http://" + apIp + "\"";
-  body += ",\"ftp\":\"ftp://" + apIp + ":21\"";
-  body += ",\"vlc\":\"http://" + apIp + "/media/\"";
+  if (staIp.length()) body += ",\"webLan\":\"http://" + staIp + "\"";
+  else body += ",\"webLan\":\"\"";
+  body += ",\"ftp\":\"ftp://" + requestHostIp() + ":21\"";
+  if (staIp.length()) body += ",\"ftpLan\":\"ftp://" + String(FTP_USER) + ":" + String(FTP_PASS) + "@" + staIp + ":21\"";
+  else body += ",\"ftpLan\":\"\"";
+  body += ",\"vlc\":\"http://" + requestHostIp() + "/media/\"";
   body += ",\"ftpUser\":\"" + String(FTP_USER) + "\"";
   body += ",\"ftpPass\":\"" + String(FTP_PASS) + "\"";
   body += ",\"ftpPort\":21";
@@ -899,6 +950,7 @@ void handleJoinWifi() {
   sendJson(200, "{\"ok\":true,\"message\":\"Connecting. The page may disconnect if the hotspot changes.\"}");
   delay(200);
   startWifi();
+  startHttp();
   startFtp();
 }
 
@@ -939,6 +991,7 @@ void handleSaveSettings() {
   pinMiso = miso;
   pinMosi = mosi;
   startWifi();
+  startHttp();
 
   sendJson(200, "{\"ok\":true,\"message\":\"Saved. Reconnect if the Wi-Fi name or mode changed.\"}");
 }
