@@ -1,0 +1,938 @@
+/*
+  ESP32 SD Reader — Wi-Fi hotspot + web file browser
+
+  1. Flash this sketch with Arduino IDE (ESP32 board support installed).
+  2. Wire a SPI microSD module (FAT32) using the default DevKit pins below,
+     or change them later in the Settings page.
+  3. Power the ESP32. It creates a Wi-Fi hotspot:
+       Name:     ESP32-SD
+       Password: sdreader1
+     If you later join home Wi-Fi and that network is missing after a
+     power cycle, the hotspot turns on automatically so you can still
+     reach the device.
+  4. Connect a phone or laptop to that network and open:
+       http://192.168.4.1
+
+  Default SPI wiring (ESP32 DevKit):
+       SD module        ESP32
+       ---------------  -----------
+       CS / SS          GPIO 5
+       SCK / CLK        GPIO 18
+       MISO / DO        GPIO 19
+       MOSI / DI        GPIO 23
+       VCC              VIN / 5V if the module has a regulator (AMS1117).
+                        Use 3V3 only if the module is 3.3V-only (no regulator).
+       GND              GND
+
+  The SD card must be formatted FAT32. The web UI is stored in flash, so the
+  site still loads if the card is missing — you can fix pins from Settings.
+*/
+
+#define DEFAULT_STORAGE_TYPE_ESP32 5  // STORAGE_SD
+#define DEFAULT_FTP_SERVER_NETWORK_TYPE_ESP32 6  // NETWORK_ESP32
+#define FTP_BUF_SIZE 8192
+#define FTP_TIME_OUT (30 * 60)
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
+#include <SD.h>
+#include <SPI.h>
+#include <Preferences.h>
+#include "qrcode.h"
+#include <SimpleFTPServer.h>
+#include "webui.h"
+
+static const char *DEFAULT_SSID = "ESP32-SD";
+static const char *DEFAULT_PASS = "sdreader1";
+static const char *FTP_USER = "sd";
+static const char *FTP_PASS = "sdreader1";
+static const uint8_t DEFAULT_CS = 5;
+static const uint8_t DEFAULT_SCK = 18;
+static const uint8_t DEFAULT_MISO = 19;
+static const uint8_t DEFAULT_MOSI = 23;
+
+static const IPAddress AP_IP(192, 168, 4, 1);
+static const IPAddress AP_GW(192, 168, 4, 1);
+static const IPAddress AP_MASK(255, 255, 255, 0);
+
+WebServer server(80);
+DNSServer dns;
+FtpServer ftpSrv;
+Preferences prefs;
+
+String apSsid;
+String apPass;
+String wifiMode = "ap";
+String staSsid;
+String staPass;
+bool hotspotFallback = false;
+uint8_t pinCs, pinSck, pinMiso, pinMosi;
+bool sdReady = false;
+uint32_t sdHz = 0;
+SPIClass *sdSpi = nullptr;
+File uploadFile;
+String uploadDir = "/";
+bool uploadOk = false;
+String uploadError;
+
+String u64str(uint64_t n) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%llu", (unsigned long long)n);
+  return String(buf);
+}
+
+String jsonEscape(const String &s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<uint8_t>(c) < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<uint8_t>(c));
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+String sanitizePath(String p) {
+  p.replace('\\', '/');
+  if (p.length() == 0) p = "/";
+  if (!p.startsWith("/")) p = "/" + p;
+
+  String out = "/";
+  int start = 1;
+  while (start <= (int)p.length()) {
+    int slash = p.indexOf('/', start);
+    if (slash < 0) slash = p.length();
+    String part = p.substring(start, slash);
+    start = slash + 1;
+    if (part.length() == 0 || part == ".") continue;
+    if (part == "..") {
+      int prev = out.lastIndexOf('/', out.length() - 2);
+      out = (prev < 0) ? "/" : out.substring(0, prev + 1);
+      continue;
+    }
+    if (out != "/") out += "/";
+    out += part;
+  }
+  if (out.length() == 0) out = "/";
+  return out;
+}
+
+String contentType(const String &path) {
+  String p = path;
+  p.toLowerCase();
+  if (p.endsWith(".html") || p.endsWith(".htm")) return "text/html";
+  if (p.endsWith(".css")) return "text/css";
+  if (p.endsWith(".js")) return "application/javascript";
+  if (p.endsWith(".json")) return "application/json";
+  if (p.endsWith(".png")) return "image/png";
+  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+  if (p.endsWith(".gif")) return "image/gif";
+  if (p.endsWith(".webp")) return "image/webp";
+  if (p.endsWith(".bmp")) return "image/bmp";
+  if (p.endsWith(".svg")) return "image/svg+xml";
+  if (p.endsWith(".txt") || p.endsWith(".log") || p.endsWith(".md") || p.endsWith(".ini") || p.endsWith(".csv")) return "text/plain";
+  if (p.endsWith(".pdf")) return "application/pdf";
+  if (p.endsWith(".mp3")) return "audio/mpeg";
+  if (p.endsWith(".wav")) return "audio/wav";
+  if (p.endsWith(".mp4") || p.endsWith(".m4v")) return "video/mp4";
+  if (p.endsWith(".webm")) return "video/webm";
+  if (p.endsWith(".mkv")) return "video/x-matroska";
+  if (p.endsWith(".mov")) return "video/quicktime";
+  if (p.endsWith(".avi")) return "video/x-msvideo";
+  return "application/octet-stream";
+}
+
+String urlDecode(String s) {
+  s.replace("+", " ");
+  String out;
+  out.reserve(s.length());
+  for (int i = 0; i < (int)s.length(); i++) {
+    if (s[i] == '%' && i + 2 < (int)s.length()) {
+      char hex[3] = { (char)s[i + 1], (char)s[i + 2], 0 };
+      out += (char)strtol(hex, nullptr, 16);
+      i += 2;
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
+}
+
+String resolveSdPath(String path) {
+  path = sanitizePath(path);
+  if (SD.exists(path)) return path;
+  String once = sanitizePath(urlDecode(path));
+  if (SD.exists(once)) return once;
+  String twice = sanitizePath(urlDecode(once));
+  if (SD.exists(twice)) return twice;
+  return path;
+}
+
+void sendJson(int code, const String &body) {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(code, "application/json", body);
+}
+
+void sendError(int code, const String &msg) {
+  sendJson(code, "{\"error\":\"" + jsonEscape(msg) + "\"}");
+}
+
+void loadSettings() {
+  prefs.begin("sdreader", false);
+  apSsid = prefs.getString("ssid", DEFAULT_SSID);
+  apPass = prefs.getString("pass", DEFAULT_PASS);
+  wifiMode = prefs.getString("wmode", "ap");
+  staSsid = prefs.getString("staSsid", "");
+  staPass = prefs.getString("staPass", "");
+  pinCs = prefs.getUChar("cs", DEFAULT_CS);
+  pinSck = prefs.getUChar("sck", DEFAULT_SCK);
+  pinMiso = prefs.getUChar("miso", DEFAULT_MISO);
+  pinMosi = prefs.getUChar("mosi", DEFAULT_MOSI);
+  if (apSsid.length() == 0) apSsid = DEFAULT_SSID;
+  if (wifiMode != "sta" && wifiMode != "both") wifiMode = "ap";
+}
+
+bool trySdBus(uint8_t spiBus, uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs, uint32_t freq) {
+  SD.end();
+  if (sdSpi) {
+    sdSpi->end();
+    delete sdSpi;
+    sdSpi = nullptr;
+  }
+  pinMode(cs, OUTPUT);
+  digitalWrite(cs, HIGH);
+  pinMode(miso, INPUT_PULLUP);
+  delay(40);
+  sdSpi = new SPIClass(spiBus);
+  sdSpi->begin(sck, miso, mosi, cs);
+  bool ok = SD.begin(cs, *sdSpi, freq, "/sd", 8);
+  Serial.printf("  bus=%u sck=%u miso=%u mosi=%u cs=%u freq=%lu -> %s\n",
+                spiBus, sck, miso, mosi, cs, (unsigned long)freq, ok ? "OK" : "fail");
+  return ok;
+}
+
+bool mountSd() {
+  sdReady = false;
+  sdHz = 0;
+  Serial.println("SD mount attempts...");
+
+  uint8_t busUsed = 0;
+  uint8_t miso = pinMiso;
+  uint8_t mosi = pinMosi;
+  bool found = false;
+  const uint8_t buses[] = {HSPI, VSPI};
+  for (uint8_t bus : buses) {
+    if (trySdBus(bus, pinSck, pinMiso, pinMosi, pinCs, 400000)) {
+      busUsed = bus;
+      found = true;
+      break;
+    }
+    if (trySdBus(bus, pinSck, pinMosi, pinMiso, pinCs, 400000)) {
+      busUsed = bus;
+      miso = pinMosi;
+      mosi = pinMiso;
+      found = true;
+      Serial.println("SD using swapped MOSI/MISO — leave wires as they are.");
+      break;
+    }
+  }
+  if (!found) {
+    Serial.printf("SD mount FAILED (CS=%u SCK=%u MISO=%u MOSI=%u)\n",
+                  pinCs, pinSck, pinMiso, pinMosi);
+    Serial.println("  Check: card inserted, FAT32, VCC on VIN/5V if the module has a regulator.");
+    return false;
+  }
+
+  const uint32_t speeds[] = {20000000, 10000000, 8000000, 4000000, 1000000, 400000};
+  for (uint32_t freq : speeds) {
+    if (trySdBus(busUsed, pinSck, miso, mosi, pinCs, freq)) {
+      sdReady = true;
+      sdHz = freq;
+      Serial.printf("SD mount OK at %lu Hz type=%u size=%s\n",
+                    (unsigned long)freq, SD.cardType(), u64str(SD.cardSize()).c_str());
+      return true;
+    }
+  }
+  Serial.println("SD mount FAILED while raising SPI speed");
+  return false;
+}
+
+void applyHotspot() {
+  const char *pass = (apPass.length() >= 8) ? apPass.c_str() : nullptr;
+  WiFi.softAPConfig(AP_IP, AP_GW, AP_MASK);
+  WiFi.softAP(apSsid.c_str(), pass, 1, 0, 4);
+  dns.start(53, "*", AP_IP);
+}
+
+bool hotspotOn() {
+  wifi_mode_t m = WiFi.getMode();
+  return m == WIFI_AP || m == WIFI_AP_STA;
+}
+
+bool staSsidInRange() {
+  int n = WiFi.scanNetworks(false, true);
+  if (n < 0) return true;
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == staSsid) {
+      found = true;
+      break;
+    }
+  }
+  WiFi.scanDelete();
+  return found;
+}
+
+bool joinStation() {
+  if (staSsid.length() == 0) return false;
+  Serial.printf("Looking for Wi-Fi \"%s\"...\n", staSsid.c_str());
+  if (!staSsidInRange()) {
+    Serial.printf("Wi-Fi \"%s\" not found\n", staSsid.c_str());
+    return false;
+  }
+  WiFi.begin(staSsid.c_str(), staPass.c_str());
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(200);
+    yield();
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("Could not join \"%s\"\n", staSsid.c_str());
+    WiFi.disconnect(false, true);
+    return false;
+  }
+  return true;
+}
+
+void startWifi() {
+  hotspotFallback = false;
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.disconnect(true, true);
+  delay(50);
+
+  bool wantSta = (wifiMode == "sta" || wifiMode == "both") && staSsid.length() > 0;
+
+  if (wantSta && wifiMode == "both") {
+    WiFi.mode(WIFI_AP_STA);
+    applyHotspot();
+    if (!joinStation()) {
+      hotspotFallback = true;
+      Serial.println("Home Wi-Fi missing — hotspot stays on");
+    }
+  } else if (wantSta) {
+    WiFi.mode(WIFI_STA);
+    if (!joinStation()) {
+      hotspotFallback = true;
+      WiFi.mode(WIFI_AP);
+      applyHotspot();
+      Serial.println("Home Wi-Fi missing — hotspot is on as fallback");
+    }
+  } else {
+    WiFi.mode(WIFI_AP);
+    applyHotspot();
+  }
+
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  MDNS.begin("esp32-sd");
+  Serial.println();
+  Serial.printf("Wi-Fi mode: %s%s\n", wifiMode.c_str(),
+                hotspotFallback ? " (hotspot fallback)" : "");
+  if (hotspotOn()) {
+    Serial.println("Hotspot ready");
+    Serial.printf("  SSID:     %s\n", apSsid.c_str());
+    Serial.printf("  Password: %s\n", apPass.length() >= 8 ? apPass.c_str() : "(open network)");
+    Serial.printf("  Open:     http://%s\n", WiFi.softAPIP().toString().c_str());
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Joined Wi-Fi %s  http://%s\n", staSsid.c_str(), WiFi.localIP().toString().c_str());
+  }
+  Serial.println("  mDNS:     http://esp32-sd.local");
+}
+
+void startFtp() {
+  if (!sdReady) return;
+  ftpSrv.begin(FTP_USER, FTP_PASS);
+  Serial.println("FTP server started");
+}
+
+String wifiQrPayload() {
+  String t = "WIFI:T:";
+  t += (apPass.length() >= 8) ? "WPA" : "nopass";
+  t += ";S:";
+  for (size_t i = 0; i < apSsid.length(); i++) {
+    char c = apSsid[i];
+    if (c == '\\' || c == ';' || c == ',' || c == ':') t += '\\';
+    t += c;
+  }
+  t += ";P:";
+  for (size_t i = 0; i < apPass.length(); i++) {
+    char c = apPass[i];
+    if (c == '\\' || c == ';' || c == ',' || c == ':') t += '\\';
+    t += c;
+  }
+  t += ";H:false;;";
+  return t;
+}
+
+static String qrBits;
+static int qrSize = 0;
+
+static void qrCollect(esp_qrcode_handle_t qrcode) {
+  qrSize = esp_qrcode_get_size(qrcode);
+  qrBits = "";
+  qrBits.reserve(qrSize * qrSize);
+  for (int y = 0; y < qrSize; y++) {
+    for (int x = 0; x < qrSize; x++) {
+      qrBits += esp_qrcode_get_module(qrcode, x, y) ? '1' : '0';
+    }
+  }
+}
+
+void handleQr() {
+  String kind = server.arg("kind");
+  String text;
+  if (kind == "wifi") text = wifiQrPayload();
+  else if (kind == "ftp") {
+    text = "ftp://";
+    text += FTP_USER;
+    text += ":";
+    text += FTP_PASS;
+    text += "@";
+    text += WiFi.softAPIP().toString();
+    text += ":21";
+  } else {
+    text = "http://";
+    text += WiFi.softAPIP().toString();
+  }
+
+  qrBits = "";
+  qrSize = 0;
+  esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+  cfg.display_func = qrCollect;
+  cfg.max_qrcode_version = 10;
+  cfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
+  if (esp_qrcode_generate(&cfg, text.c_str()) != ESP_OK || qrSize == 0) {
+    sendError(500, "Could not build QR code");
+    return;
+  }
+  sendJson(200, "{\"size\":" + String(qrSize) + ",\"bits\":\"" + qrBits + "\"}");
+}
+
+void handleIndex() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleStatus() {
+  uint64_t total = sdReady ? SD.cardSize() : 0;
+  uint64_t used = sdReady ? SD.usedBytes() : 0;
+  const char *type = "none";
+  if (sdReady) {
+    switch (SD.cardType()) {
+      case CARD_MMC: type = "MMC"; break;
+      case CARD_SD: type = "SD"; break;
+      case CARD_SDHC: type = "SDHC"; break;
+      default: type = "unknown"; break;
+    }
+  }
+  String apIp = WiFi.softAPIP().toString();
+  String staIp = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "";
+  String body = "{";
+  body += "\"sd\":" + String(sdReady ? "true" : "false");
+  body += ",\"cardType\":\"" + String(type) + "\"";
+  body += ",\"total\":" + u64str(total);
+  body += ",\"used\":" + u64str(used);
+  body += ",\"clients\":" + String(WiFi.softAPgetStationNum());
+  body += ",\"uptime\":" + String(millis());
+  body += ",\"heap\":" + String(ESP.getFreeHeap());
+  body += ",\"ip\":\"" + apIp + "\"";
+  body += ",\"staIp\":\"" + staIp + "\"";
+  body += ",\"wifiMode\":\"" + jsonEscape(wifiMode) + "\"";
+  body += ",\"staSsid\":\"" + jsonEscape(staSsid) + "\"";
+  body += ",\"staConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+  body += ",\"hotspot\":" + String(hotspotOn() ? "true" : "false");
+  body += ",\"hotspotFallback\":" + String(hotspotFallback ? "true" : "false");
+  body += ",\"ssid\":\"" + jsonEscape(apSsid) + "\"";
+  body += ",\"wifiPass\":\"" + jsonEscape(apPass) + "\"";
+  body += ",\"web\":\"http://" + apIp + "\"";
+  body += ",\"ftp\":\"ftp://" + apIp + ":21\"";
+  body += ",\"vlc\":\"http://" + apIp + "/media/\"";
+  body += ",\"ftpUser\":\"" + String(FTP_USER) + "\"";
+  body += ",\"ftpPass\":\"" + String(FTP_PASS) + "\"";
+  body += ",\"ftpPort\":21";
+  body += ",\"sdHz\":" + String((unsigned long)sdHz);
+  body += "}";
+  sendJson(200, body);
+}
+
+void appendDirEntries(File &dir, bool wantDir, String &body, bool &first) {
+  File f = dir.openNextFile();
+  while (f) {
+    if (f.isDirectory() == wantDir) {
+      if (!first) body += ",";
+      first = false;
+      String name = f.name();
+      int slash = name.lastIndexOf('/');
+      if (slash >= 0) name = name.substring(slash + 1);
+      body += "{\"name\":\"" + jsonEscape(name) + "\"";
+      body += ",\"dir\":" + String(wantDir ? "true" : "false");
+      body += ",\"size\":" + u64str(f.size()) + "}";
+    }
+    f.close();
+    f = dir.openNextFile();
+  }
+}
+
+void handleList() {
+  if (!sdReady) {
+    sendError(503, "SD card is not mounted");
+    return;
+  }
+  String path = sanitizePath(server.arg("path"));
+  File dir = SD.open(path);
+  if (!dir) {
+    sendError(404, "Folder not found");
+    return;
+  }
+  if (!dir.isDirectory()) {
+    dir.close();
+    sendError(400, "Not a folder");
+    return;
+  }
+
+  String body = "{\"path\":\"" + jsonEscape(path) + "\",\"items\":[";
+  bool first = true;
+  appendDirEntries(dir, true, body, first);
+  dir.close();
+  dir = SD.open(path);
+  if (dir) {
+    appendDirEntries(dir, false, body, first);
+    dir.close();
+  }
+  body += "]}";
+  sendJson(200, body);
+}
+
+void sendCors() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Headers", "Range");
+  server.sendHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
+  server.sendHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges");
+}
+
+void serveSdFile(String path, bool download) {
+  if (!sdReady) {
+    sendError(503, "SD card is not mounted");
+    return;
+  }
+  path = resolveSdPath(path);
+  if (path == "/") {
+    sendError(400, "Pick a file");
+    return;
+  }
+  if (!SD.exists(path)) {
+    sendError(404, "File not found");
+    return;
+  }
+  File f = SD.open(path, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    sendError(400, "Cannot read that path");
+    return;
+  }
+
+  const size_t fileSize = f.size();
+  size_t start = 0;
+  size_t end = fileSize ? fileSize - 1 : 0;
+  bool ranged = false;
+  if (server.hasHeader("Range")) {
+    String range = server.header("Range");
+    if (range.startsWith("bytes=")) {
+      range = range.substring(6);
+      int dash = range.indexOf('-');
+      String a = range.substring(0, dash);
+      String b = range.substring(dash + 1);
+      if (a.length()) start = a.toInt();
+      if (b.length()) end = b.toInt();
+      ranged = true;
+    }
+  }
+  sendCors();
+  if (fileSize == 0) {
+    server.send(200, contentType(path), "");
+    f.close();
+    return;
+  }
+  if (start >= fileSize || end < start) {
+    server.sendHeader("Content-Range", "bytes */" + String(fileSize));
+    server.send(416, "text/plain", "Range Not Satisfiable");
+    f.close();
+    return;
+  }
+  if (end >= fileSize) end = fileSize - 1;
+  size_t len = end - start + 1;
+
+  String name = path.substring(path.lastIndexOf('/') + 1);
+  if (download) {
+    server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+  }
+  server.sendHeader("Accept-Ranges", "bytes");
+  server.sendHeader("Cache-Control", "public, max-age=3600");
+  server.sendHeader("Content-Disposition", "inline; filename=\"" + name + "\"");
+  if (ranged) {
+    server.sendHeader("Content-Range", "bytes " + String(start) + "-" + String(end) + "/" + String((unsigned long)fileSize));
+  }
+  server.setContentLength(len);
+  server.send(ranged ? 206 : 200, contentType(path), "");
+  if (server.method() == HTTP_HEAD) {
+    f.close();
+    return;
+  }
+
+  f.seek(start);
+  WiFiClient client = server.client();
+  static uint8_t buf[4096];
+  size_t remain = len;
+  uint16_t stall = 0;
+  while (remain && client.connected()) {
+    size_t chunk = remain > sizeof(buf) ? sizeof(buf) : remain;
+    int n = f.read(buf, chunk);
+    if (n <= 0) break;
+    size_t sent = 0;
+    while (sent < (size_t)n && client.connected()) {
+      int w = client.write(buf + sent, n - sent);
+      if (w > 0) {
+        sent += w;
+        stall = 0;
+      } else {
+        delay(2);
+        yield();
+        if (++stall > 400) break;
+      }
+    }
+    if (sent < (size_t)n) break;
+    remain -= sent;
+    yield();
+  }
+  f.close();
+}
+
+void handleFile() {
+  serveSdFile(server.arg("path"), server.arg("download") == "1");
+}
+
+void handlePlay() {
+  serveSdFile(server.arg("path"), false);
+}
+
+void handleDelete() {
+  if (!sdReady) {
+    sendError(503, "SD card is not mounted");
+    return;
+  }
+  String path = sanitizePath(server.arg("path"));
+  if (path == "/") {
+    sendError(400, "Cannot delete the root folder");
+    return;
+  }
+  if (!SD.exists(path)) {
+    sendError(404, "Not found");
+    return;
+  }
+  File f = SD.open(path);
+  bool isDir = f && f.isDirectory();
+  if (f) f.close();
+  bool ok = isDir ? SD.rmdir(path) : SD.remove(path);
+  if (!ok) {
+    sendError(500, isDir ? "Folder must be empty before it can be deleted" : "Delete failed");
+    return;
+  }
+  sendJson(200, "{\"ok\":true}");
+}
+
+void handleMkdir() {
+  if (!sdReady) {
+    sendError(503, "SD card is not mounted");
+    return;
+  }
+  String path = sanitizePath(server.arg("path"));
+  if (path == "/") {
+    sendError(400, "Invalid folder name");
+    return;
+  }
+  if (SD.exists(path)) {
+    sendError(409, "Already exists");
+    return;
+  }
+  if (!SD.mkdir(path)) {
+    sendError(500, "Could not create folder");
+    return;
+  }
+  sendJson(200, "{\"ok\":true}");
+}
+
+void handleUpload() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    uploadOk = false;
+    uploadError = "";
+    if (!sdReady) {
+      uploadError = "SD card is not mounted";
+      return;
+    }
+    uploadDir = server.hasArg("path") ? sanitizePath(server.arg("path")) : "/";
+    String name = up.filename;
+    name.replace('\\', '/');
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    name.replace(":", "_");
+    if (name.length() == 0) name = "upload.bin";
+    String dest = (uploadDir == "/") ? ("/" + name) : (uploadDir + "/" + name);
+    if (SD.exists(dest)) SD.remove(dest);
+    uploadFile = SD.open(dest, FILE_WRITE);
+    if (!uploadFile) {
+      uploadError = "Could not create " + dest;
+      Serial.println(uploadError);
+      return;
+    }
+    Serial.printf("Upload start: %s\n", dest.c_str());
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (uploadFile) {
+      size_t written = uploadFile.write(up.buf, up.currentSize);
+      if (written != up.currentSize) {
+        uploadError = "SD write failed";
+      }
+      yield();
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (uploadFile) {
+      uploadFile.close();
+      uploadFile = File();
+    }
+    uploadOk = (uploadError.length() == 0);
+    Serial.printf("Upload done: %u bytes ok=%d\n", up.totalSize, uploadOk);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (uploadFile) {
+      uploadFile.close();
+      uploadFile = File();
+    }
+    uploadError = "Upload aborted";
+  }
+}
+
+void handleUploadDone() {
+  if (!sdReady) {
+    sendError(503, "SD card is not mounted");
+    return;
+  }
+  if (!uploadOk) {
+    sendError(500, uploadError.length() ? uploadError : "Upload failed");
+    return;
+  }
+  sendJson(200, "{\"ok\":true}");
+}
+
+void handleGetSettings() {
+  String body = "{";
+  body += "\"ssid\":\"" + jsonEscape(apSsid) + "\"";
+  body += ",\"hasPassword\":" + String(apPass.length() >= 8 ? "true" : "false");
+  body += ",\"wifiMode\":\"" + jsonEscape(wifiMode) + "\"";
+  body += ",\"staSsid\":\"" + jsonEscape(staSsid) + "\"";
+  body += ",\"staConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+  body += ",\"hotspot\":" + String(hotspotOn() ? "true" : "false");
+  body += ",\"hotspotFallback\":" + String(hotspotFallback ? "true" : "false");
+  body += ",\"staIp\":\"" + ((WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "") + "\"";
+  body += ",\"cs\":" + String(pinCs);
+  body += ",\"sck\":" + String(pinSck);
+  body += ",\"miso\":" + String(pinMiso);
+  body += ",\"mosi\":" + String(pinMosi);
+  body += "}";
+  sendJson(200, body);
+}
+
+void handleScanWifi() {
+  wifi_mode_t prev = WiFi.getMode();
+  if (prev == WIFI_AP) WiFi.mode(WIFI_AP_STA);
+  int n = WiFi.scanNetworks(false, true);
+  String body = "[";
+  for (int i = 0; i < n; i++) {
+    if (i) body += ",";
+    bool sec = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    body += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\"";
+    body += ",\"rssi\":" + String(WiFi.RSSI(i));
+    body += ",\"secure\":" + String(sec ? "true" : "false") + "}";
+  }
+  body += "]";
+  WiFi.scanDelete();
+  if (wifiMode == "ap" || hotspotFallback) WiFi.mode(WIFI_AP);
+  sendJson(200, body);
+}
+
+void handleJoinWifi() {
+  String ssid = server.arg("ssid");
+  ssid.trim();
+  String pass = server.arg("password");
+  String mode = server.arg("mode");
+  if (ssid.length() == 0) {
+    sendError(400, "Pick a network");
+    return;
+  }
+  if (mode != "sta" && mode != "both") mode = "both";
+  staSsid = ssid;
+  staPass = pass;
+  wifiMode = mode;
+  prefs.putString("staSsid", staSsid);
+  prefs.putString("staPass", staPass);
+  prefs.putString("wmode", wifiMode);
+  sendJson(200, "{\"ok\":true,\"message\":\"Connecting. The page may disconnect if the hotspot changes.\"}");
+  delay(200);
+  startWifi();
+  startFtp();
+}
+
+void handleSaveSettings() {
+  String ssid = server.arg("ssid");
+  ssid.trim();
+  if (ssid.length() == 0 || ssid.length() > 31) {
+    sendError(400, "SSID must be 1–31 characters");
+    return;
+  }
+  String pass = server.arg("password");
+  bool openNet = server.arg("open") == "1";
+  if (!openNet && pass.length() > 0 && pass.length() < 8) {
+    sendError(400, "Password must be at least 8 characters");
+    return;
+  }
+  uint8_t cs = server.arg("cs").toInt();
+  uint8_t sck = server.arg("sck").toInt();
+  uint8_t miso = server.arg("miso").toInt();
+  uint8_t mosi = server.arg("mosi").toInt();
+  String mode = server.arg("wifiMode");
+  if (mode == "sta" || mode == "both" || mode == "ap") wifiMode = mode;
+
+  apSsid = ssid;
+  if (openNet) apPass = "";
+  else if (pass.length() >= 8) apPass = pass;
+
+  prefs.putString("ssid", apSsid);
+  prefs.putString("pass", apPass);
+  prefs.putString("wmode", wifiMode);
+  prefs.putUChar("cs", cs);
+  prefs.putUChar("sck", sck);
+  prefs.putUChar("miso", miso);
+  prefs.putUChar("mosi", mosi);
+
+  pinCs = cs;
+  pinSck = sck;
+  pinMiso = miso;
+  pinMosi = mosi;
+  startWifi();
+
+  sendJson(200, "{\"ok\":true,\"message\":\"Saved. Reconnect if the Wi-Fi name or mode changed.\"}");
+}
+
+void handleRemount() {
+  bool ok = mountSd();
+  if (ok) startFtp();
+  sendJson(ok ? 200 : 500, ok ? "{\"ok\":true,\"message\":\"SD card mounted\"}"
+                             : "{\"ok\":false,\"message\":\"SD card did not mount\"}");
+}
+
+void handleReboot() {
+  sendJson(200, "{\"ok\":true,\"message\":\"Rebooting\"}");
+  delay(250);
+  ESP.restart();
+}
+
+void handleNotFound() {
+  if (server.method() == HTTP_OPTIONS) {
+    sendCors();
+    server.send(204);
+    return;
+  }
+  String uri = server.uri();
+  if (uri.startsWith("/v.") && server.hasArg("path")) {
+    serveSdFile(server.arg("path"), false);
+    return;
+  }
+  if (uri.startsWith("/media/") || uri == "/media") {
+    String path = (uri == "/media") ? server.arg("path") : uri.substring(6);
+    serveSdFile(path, false);
+    return;
+  }
+  if (uri.startsWith("/api/")) {
+    sendError(404, "Not found");
+    return;
+  }
+  handleIndex();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\nESP32 SD Reader");
+
+  loadSettings();
+  mountSd();
+  startWifi();
+  startFtp();
+
+  server.on("/", HTTP_GET, handleIndex);
+  server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/list", HTTP_GET, handleList);
+  server.on("/api/file", HTTP_GET, handleFile);
+  server.on("/api/file", HTTP_HEAD, handleFile);
+  const char *playExt[] = {"/v.mp4", "/v.m4v", "/v.webm", "/v.mkv", "/v.mov", "/v.avi"};
+  for (const char *p : playExt) {
+    server.on(p, HTTP_GET, handlePlay);
+    server.on(p, HTTP_HEAD, handlePlay);
+  }
+  server.on("/api/delete", HTTP_POST, handleDelete);
+  server.on("/api/mkdir", HTTP_POST, handleMkdir);
+  server.on("/api/upload", HTTP_POST, handleUploadDone, handleUpload);
+  server.on("/api/settings", HTTP_GET, handleGetSettings);
+  server.on("/api/settings", HTTP_POST, handleSaveSettings);
+  server.on("/api/remount", HTTP_POST, handleRemount);
+  server.on("/api/qr", HTTP_GET, handleQr);
+  server.on("/api/scan", HTTP_GET, handleScanWifi);
+  server.on("/api/wifi/join", HTTP_POST, handleJoinWifi);
+  server.on("/api/reboot", HTTP_POST, handleReboot);
+  server.on("/generate_204", HTTP_GET, []() { server.send(204); });
+  server.on("/gen_204", HTTP_GET, []() { server.send(204); });
+  server.on("/hotspot-detect.html", HTTP_GET, []() { server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"); });
+  server.on("/ncsi.txt", HTTP_GET, []() { server.send(200, "text/plain", "Microsoft NCSI"); });
+  server.on("/connecttest.txt", HTTP_GET, []() { server.send(200, "text/plain", "OK"); });
+  server.onNotFound(handleNotFound);
+  const char *hdrs[] = {"Range"};
+  server.collectHeaders(hdrs, 1);
+  server.begin();
+}
+
+void loop() {
+  if (sdReady) {
+    uint32_t t = millis();
+    while ((uint32_t)(millis() - t) < 25) {
+      ftpSrv.handleFTP();
+      yield();
+    }
+  }
+  dns.processNextRequest();
+  server.handleClient();
+}
