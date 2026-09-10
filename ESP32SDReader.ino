@@ -26,18 +26,24 @@
 
   The SD card must be formatted FAT32. The web UI is stored in flash, so the
   site still loads if the card is missing — you can fix pins from Settings.
+
+  Typical 6-pin SPI modules cannot do native SDMMC. Firmware mounts SPI only.
 */
 
 #define DEFAULT_STORAGE_TYPE_ESP32 5  // STORAGE_SD
 #define DEFAULT_FTP_SERVER_NETWORK_TYPE_ESP32 6  // NETWORK_ESP32
-#define FTP_BUF_SIZE 8192
+#define FTP_BUF_SIZE 16384
 #define FTP_TIME_OUT (30 * 60)
+#define HTTP_UPLOAD_BUFLEN 8192
+#define SD_XFER_BUF 16384
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
+#include <FS.h>
 #include <SD.h>
+#include <SD_MMC.h>
 #include <SPI.h>
 #include <Preferences.h>
 #include "qrcode.h"
@@ -70,12 +76,28 @@ String staPass;
 bool hotspotFallback = false;
 uint8_t pinCs, pinSck, pinMiso, pinMosi;
 bool sdReady = false;
+bool useSdmmc = false;
+String sdBus = "none";
 uint32_t sdHz = 0;
 SPIClass *sdSpi = nullptr;
 File uploadFile;
 String uploadDir = "/";
 bool uploadOk = false;
 String uploadError;
+
+static uint8_t sdXferBuf[SD_XFER_BUF];
+
+fs::FS &sdFs() {
+  return useSdmmc ? static_cast<fs::FS &>(SD_MMC) : static_cast<fs::FS &>(SD);
+}
+bool sdExists(const String &p) { return sdFs().exists(p); }
+File sdOpen(const String &p, const char *mode = FILE_READ) { return sdFs().open(p, mode); }
+bool sdRemove(const String &p) { return sdFs().remove(p); }
+bool sdMkdir(const String &p) { return sdFs().mkdir(p); }
+bool sdRmdir(const String &p) { return sdFs().rmdir(p); }
+uint64_t sdCardSize() { return useSdmmc ? SD_MMC.cardSize() : SD.cardSize(); }
+uint64_t sdUsedBytes() { return useSdmmc ? SD_MMC.usedBytes() : SD.usedBytes(); }
+uint8_t sdType() { return useSdmmc ? (uint8_t)SD_MMC.cardType() : (uint8_t)SD.cardType(); }
 
 String u64str(uint64_t n) {
   char buf[24];
@@ -175,11 +197,11 @@ String urlDecode(String s) {
 
 String resolveSdPath(String path) {
   path = sanitizePath(path);
-  if (SD.exists(path)) return path;
+  if (sdExists(path)) return path;
   String once = sanitizePath(urlDecode(path));
-  if (SD.exists(once)) return once;
+  if (sdExists(once)) return once;
   String twice = sanitizePath(urlDecode(once));
-  if (SD.exists(twice)) return twice;
+  if (sdExists(twice)) return twice;
   return path;
 }
 
@@ -207,7 +229,41 @@ void loadSettings() {
   if (wifiMode != "sta" && wifiMode != "both") wifiMode = "ap";
 }
 
-bool trySdBus(uint8_t spiBus, uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs, uint32_t freq) {
+bool mountSdmmc() {
+  Serial.println("Trying SD_MMC 1-bit (CLK=14 CMD=15 D0=2)...");
+  SD_MMC.end();
+  pinMode(14, INPUT_PULLUP);
+  pinMode(15, INPUT_PULLUP);
+  pinMode(2, INPUT_PULLUP);
+  delay(30);
+  if (!SD_MMC.setPins(14, 15, 2)) {
+    Serial.println("  SD_MMC setPins failed");
+    return false;
+  }
+  const int freqs[] = {400};
+  for (int freq : freqs) {
+    SD_MMC.end();
+    pinMode(14, INPUT_PULLUP);
+    pinMode(15, INPUT_PULLUP);
+    pinMode(2, INPUT_PULLUP);
+    delay(20);
+    if (!SD_MMC.setPins(14, 15, 2)) continue;
+    if (SD_MMC.begin("/sd", true, false, freq, 5)) {
+      useSdmmc = true;
+      sdBus = "SDMMC 1-bit";
+      sdHz = (uint32_t)freq * 1000UL;
+      sdReady = true;
+      Serial.printf("SD_MMC mount OK at %d kHz type=%u size=%s\n",
+                    freq, SD_MMC.cardType(), u64str(SD_MMC.cardSize()).c_str());
+      return true;
+    }
+    Serial.printf("  SD_MMC %d kHz -> fail\n", freq);
+  }
+  SD_MMC.end();
+  return false;
+}
+
+bool trySdBus(uint8_t spiBus, uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs, uint32_t freq, bool log = false) {
   SD.end();
   if (sdSpi) {
     sdSpi->end();
@@ -217,32 +273,32 @@ bool trySdBus(uint8_t spiBus, uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t c
   pinMode(cs, OUTPUT);
   digitalWrite(cs, HIGH);
   pinMode(miso, INPUT_PULLUP);
-  delay(40);
+  delay(20);
   sdSpi = new SPIClass(spiBus);
   sdSpi->begin(sck, miso, mosi, cs);
-  bool ok = SD.begin(cs, *sdSpi, freq, "/sd", 8);
-  Serial.printf("  bus=%u sck=%u miso=%u mosi=%u cs=%u freq=%lu -> %s\n",
-                spiBus, sck, miso, mosi, cs, (unsigned long)freq, ok ? "OK" : "fail");
+  bool ok = SD.begin(cs, *sdSpi, freq, "/sd", 5);
+  if (log || ok) {
+    Serial.printf("  bus=%u sck=%u miso=%u mosi=%u cs=%u freq=%lu -> %s\n",
+                  spiBus, sck, miso, mosi, cs, (unsigned long)freq, ok ? "OK" : "fail");
+  }
   return ok;
 }
 
-bool mountSd() {
-  sdReady = false;
-  sdHz = 0;
-  Serial.println("SD mount attempts...");
-
+bool mountSdSpi() {
+  useSdmmc = false;
+  sdBus = "none";
   uint8_t busUsed = 0;
   uint8_t miso = pinMiso;
   uint8_t mosi = pinMosi;
   bool found = false;
   const uint8_t buses[] = {HSPI, VSPI};
   for (uint8_t bus : buses) {
-    if (trySdBus(bus, pinSck, pinMiso, pinMosi, pinCs, 400000)) {
+    if (trySdBus(bus, pinSck, pinMiso, pinMosi, pinCs, 400000, true)) {
       busUsed = bus;
       found = true;
       break;
     }
-    if (trySdBus(bus, pinSck, pinMosi, pinMiso, pinCs, 400000)) {
+    if (trySdBus(bus, pinSck, pinMosi, pinMiso, pinCs, 400000, true)) {
       busUsed = bus;
       miso = pinMosi;
       mosi = pinMiso;
@@ -252,24 +308,55 @@ bool mountSd() {
     }
   }
   if (!found) {
-    Serial.printf("SD mount FAILED (CS=%u SCK=%u MISO=%u MOSI=%u)\n",
+    Serial.printf("SD SPI FAILED (CS=%u SCK=%u MISO=%u MOSI=%u)\n",
                   pinCs, pinSck, pinMiso, pinMosi);
-    Serial.println("  Check: card inserted, FAT32, VCC on VIN/5V if the module has a regulator.");
     return false;
   }
 
-  const uint32_t speeds[] = {20000000, 10000000, 8000000, 4000000, 1000000, 400000};
+  const uint32_t speeds[] = {40000000, 26666666, 20000000, 16000000, 10000000, 8000000, 4000000, 1000000, 400000};
   for (uint32_t freq : speeds) {
-    if (trySdBus(busUsed, pinSck, miso, mosi, pinCs, freq)) {
+    if (trySdBus(busUsed, pinSck, miso, mosi, pinCs, freq, freq >= 20000000)) {
       sdReady = true;
+      useSdmmc = false;
+      sdBus = "SPI";
       sdHz = freq;
-      Serial.printf("SD mount OK at %lu Hz type=%u size=%s\n",
+      Serial.printf("SD SPI mount OK at %lu Hz type=%u size=%s\n",
                     (unsigned long)freq, SD.cardType(), u64str(SD.cardSize()).c_str());
       return true;
     }
   }
-  Serial.println("SD mount FAILED while raising SPI speed");
+  Serial.println("SD SPI FAILED while raising clock");
   return false;
+}
+
+void dumpSdRoot() {
+  File dir = sdOpen("/");
+  if (!dir) {
+    Serial.println("SD root open failed");
+    return;
+  }
+  int n = 0;
+  File f = dir.openNextFile();
+  while (f && n < 12) {
+    Serial.printf("  %s%s\n", f.isDirectory() ? "[dir] " : "", f.name());
+    f.close();
+    f = dir.openNextFile();
+    n++;
+  }
+  dir.close();
+  if (n == 0) Serial.println("  (root is empty)");
+}
+
+bool mountSd() {
+  sdReady = false;
+  useSdmmc = false;
+  sdBus = "none";
+  sdHz = 0;
+  Serial.println("SD mount attempts...");
+  if (!mountSdSpi()) return false;
+  Serial.println("SD root:");
+  dumpSdRoot();
+  return true;
 }
 
 void applyHotspot() {
@@ -369,7 +456,10 @@ void startWifi() {
 void startFtp() {
   if (!sdReady) return;
   ftpSrv.begin(FTP_USER, FTP_PASS);
-  Serial.println("FTP server started");
+  IPAddress ip = hotspotOn() ? WiFi.softAPIP() : WiFi.localIP();
+  if ((uint32_t)ip == 0) ip = WiFi.softAPIP();
+  ftpSrv.setLocalIp(ip);
+  Serial.printf("FTP server started  ftp://%s:%s@%s:21\n", FTP_USER, FTP_PASS, ip.toString().c_str());
 }
 
 String wifiQrPayload() {
@@ -441,11 +531,11 @@ void handleIndex() {
 }
 
 void handleStatus() {
-  uint64_t total = sdReady ? SD.cardSize() : 0;
-  uint64_t used = sdReady ? SD.usedBytes() : 0;
+  uint64_t total = sdReady ? sdCardSize() : 0;
+  uint64_t used = sdReady ? sdUsedBytes() : 0;
   const char *type = "none";
   if (sdReady) {
-    switch (SD.cardType()) {
+    switch (sdType()) {
       case CARD_MMC: type = "MMC"; break;
       case CARD_SD: type = "SD"; break;
       case CARD_SDHC: type = "SDHC"; break;
@@ -478,6 +568,7 @@ void handleStatus() {
   body += ",\"ftpPass\":\"" + String(FTP_PASS) + "\"";
   body += ",\"ftpPort\":21";
   body += ",\"sdHz\":" + String((unsigned long)sdHz);
+  body += ",\"sdBus\":\"" + jsonEscape(sdBus) + "\"";
   body += "}";
   sendJson(200, body);
 }
@@ -506,7 +597,7 @@ void handleList() {
     return;
   }
   String path = sanitizePath(server.arg("path"));
-  File dir = SD.open(path);
+  File dir = sdOpen(path);
   if (!dir) {
     sendError(404, "Folder not found");
     return;
@@ -521,7 +612,7 @@ void handleList() {
   bool first = true;
   appendDirEntries(dir, true, body, first);
   dir.close();
-  dir = SD.open(path);
+  dir = sdOpen(path);
   if (dir) {
     appendDirEntries(dir, false, body, first);
     dir.close();
@@ -547,16 +638,17 @@ void serveSdFile(String path, bool download) {
     sendError(400, "Pick a file");
     return;
   }
-  if (!SD.exists(path)) {
+  if (!sdExists(path)) {
     sendError(404, "File not found");
     return;
   }
-  File f = SD.open(path, FILE_READ);
+  File f = sdOpen(path, FILE_READ);
   if (!f || f.isDirectory()) {
     if (f) f.close();
     sendError(400, "Cannot read that path");
     return;
   }
+  f.setBufferSize(SD_XFER_BUF);
 
   const size_t fileSize = f.size();
   size_t start = 0;
@@ -592,10 +684,11 @@ void serveSdFile(String path, bool download) {
   String name = path.substring(path.lastIndexOf('/') + 1);
   if (download) {
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+  } else {
+    server.sendHeader("Content-Disposition", "inline; filename=\"" + name + "\"");
   }
   server.sendHeader("Accept-Ranges", "bytes");
   server.sendHeader("Cache-Control", "public, max-age=3600");
-  server.sendHeader("Content-Disposition", "inline; filename=\"" + name + "\"");
   if (ranged) {
     server.sendHeader("Content-Range", "bytes " + String(start) + "-" + String(end) + "/" + String((unsigned long)fileSize));
   }
@@ -608,28 +701,32 @@ void serveSdFile(String path, bool download) {
 
   f.seek(start);
   WiFiClient client = server.client();
-  static uint8_t buf[4096];
+  client.setNoDelay(true);
+  client.setTimeout(30000);
   size_t remain = len;
   uint16_t stall = 0;
+  uint32_t lastYield = millis();
   while (remain && client.connected()) {
-    size_t chunk = remain > sizeof(buf) ? sizeof(buf) : remain;
-    int n = f.read(buf, chunk);
+    size_t chunk = remain > SD_XFER_BUF ? SD_XFER_BUF : remain;
+    int n = f.read(sdXferBuf, chunk);
     if (n <= 0) break;
     size_t sent = 0;
     while (sent < (size_t)n && client.connected()) {
-      int w = client.write(buf + sent, n - sent);
+      int w = client.write(sdXferBuf + sent, n - sent);
       if (w > 0) {
         sent += w;
         stall = 0;
       } else {
-        delay(2);
         yield();
-        if (++stall > 400) break;
+        if (++stall > 800) break;
       }
     }
     if (sent < (size_t)n) break;
     remain -= sent;
-    yield();
+    if ((uint32_t)(millis() - lastYield) >= 20) {
+      yield();
+      lastYield = millis();
+    }
   }
   f.close();
 }
@@ -652,14 +749,14 @@ void handleDelete() {
     sendError(400, "Cannot delete the root folder");
     return;
   }
-  if (!SD.exists(path)) {
+  if (!sdExists(path)) {
     sendError(404, "Not found");
     return;
   }
-  File f = SD.open(path);
+  File f = sdOpen(path);
   bool isDir = f && f.isDirectory();
   if (f) f.close();
-  bool ok = isDir ? SD.rmdir(path) : SD.remove(path);
+  bool ok = isDir ? sdRmdir(path) : sdRemove(path);
   if (!ok) {
     sendError(500, isDir ? "Folder must be empty before it can be deleted" : "Delete failed");
     return;
@@ -677,11 +774,11 @@ void handleMkdir() {
     sendError(400, "Invalid folder name");
     return;
   }
-  if (SD.exists(path)) {
+  if (sdExists(path)) {
     sendError(409, "Already exists");
     return;
   }
-  if (!SD.mkdir(path)) {
+  if (!sdMkdir(path)) {
     sendError(500, "Could not create folder");
     return;
   }
@@ -705,14 +802,13 @@ void handleUpload() {
     name.replace(":", "_");
     if (name.length() == 0) name = "upload.bin";
     String dest = (uploadDir == "/") ? ("/" + name) : (uploadDir + "/" + name);
-    if (SD.exists(dest)) SD.remove(dest);
-    uploadFile = SD.open(dest, FILE_WRITE);
+    if (sdExists(dest)) sdRemove(dest);
+    uploadFile = sdOpen(dest, FILE_WRITE);
     if (!uploadFile) {
       uploadError = "Could not create " + dest;
-      Serial.println(uploadError);
       return;
     }
-    Serial.printf("Upload start: %s\n", dest.c_str());
+    uploadFile.setBufferSize(SD_XFER_BUF);
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) {
       size_t written = uploadFile.write(up.buf, up.currentSize);
@@ -727,7 +823,6 @@ void handleUpload() {
       uploadFile = File();
     }
     uploadOk = (uploadError.length() == 0);
-    Serial.printf("Upload done: %u bytes ok=%d\n", up.totalSize, uploadOk);
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     if (uploadFile) {
       uploadFile.close();
@@ -926,13 +1021,7 @@ void setup() {
 }
 
 void loop() {
-  if (sdReady) {
-    uint32_t t = millis();
-    while ((uint32_t)(millis() - t) < 25) {
-      ftpSrv.handleFTP();
-      yield();
-    }
-  }
   dns.processNextRequest();
   server.handleClient();
+  if (sdReady) ftpSrv.handleFTP();
 }

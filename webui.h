@@ -98,13 +98,21 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .link-row .btn { flex: none; margin-left: auto; align-self: center; }
   .drop {
     margin: 12px; border: 1.5px dashed var(--line); border-radius: 12px;
-    padding: 18px; text-align: center; color: var(--muted); font-size: .9rem; cursor: pointer;
+    padding: 12px 14px; color: var(--muted); font-size: .9rem; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   }
+  .drop span { flex: 1; min-width: 160px; }
   .drop.hot { border-color: var(--accent); color: var(--text); background: rgba(215,176,86,.08); }
   .progress { height: 4px; background: var(--line); margin: 0 12px 6px; border-radius: 99px; overflow: hidden; display: none; }
   .progress > div { height: 100%; width: 0; background: var(--accent); }
   .xfer { margin: 0 12px 10px; font-size: .8rem; color: var(--muted); display: none; }
-  .list { min-height: 180px; }
+  .list {
+    min-height: 180px;
+    max-height: min(68vh, 720px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
   .row {
     display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 10px; align-items: center;
     padding: 12px 14px; border-top: 1px solid var(--line); cursor: pointer;
@@ -135,6 +143,63 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .list.grid .acts {
     justify-content: center; overflow: visible; flex-wrap: wrap;
   }
+  #watchBtn[hidden] { display: none; }
+  #feed {
+    display: none; position: fixed; inset: 0; z-index: 40; background: #000;
+  }
+  #feed.on { display: block; }
+  #feedTrack {
+    height: 100%; height: 100dvh;
+    overflow-y: auto; scroll-snap-type: y mandatory; scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+  }
+  .feed-slide {
+    position: relative; height: 100%; height: 100dvh;
+    scroll-snap-align: start; scroll-snap-stop: always;
+    background: #000; display: flex; align-items: center; justify-content: center;
+  }
+  .feed-slide video {
+    width: 100%; height: 100%; object-fit: contain; background: #000;
+  }
+  .feed-slide.fail video { visibility: hidden; }
+  .feed-fail {
+    display: none; position: absolute; inset: 0; z-index: 1;
+    background: #111; color: #fff; place-items: center; text-align: center;
+    padding: 28px 22px; gap: 12px;
+  }
+  .feed-slide.fail .feed-fail { display: grid; }
+  .feed-fail b { font-size: 1.05rem; }
+  .feed-fail .hint { color: rgba(255,255,255,.75); max-width: 22rem; }
+  .feed-bar {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; padding-top: max(12px, env(safe-area-inset-top));
+    background: linear-gradient(180deg, rgba(0,0,0,.65), transparent);
+  }
+  .feed-bar b {
+    min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #fff; font-size: .9rem;
+  }
+  .feed-bar .btn { background: rgba(255,255,255,.14); color: #fff; border-color: transparent; }
+  .feed-meta {
+    position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 2;
+    color: #fff; text-shadow: 0 1px 8px #000;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .feed-meta .hint { color: rgba(255,255,255,.8); }
+  .feed-progress {
+    margin-top: 12px; height: 22px; display: flex; align-items: center; cursor: pointer;
+  }
+  .feed-progress-track {
+    position: relative; width: 100%; height: 4px; border-radius: 99px;
+    background: rgba(255,255,255,.22); overflow: hidden;
+  }
+  .feed-progress-buf, .feed-progress-now {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  }
+  .feed-progress-buf { background: rgba(255,255,255,.38); }
+  .feed-progress-now { background: var(--accent); }
+  .feed-slide.fail .feed-progress { display: none; }
   .empty, .error { padding: 36px 16px; text-align: center; color: var(--muted); }
   .form { padding: 16px; display: grid; gap: 14px; }
   label { display: grid; gap: 6px; font-size: .85rem; color: var(--muted); }
@@ -212,17 +277,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <section id="filesTab" class="panel">
     <div class="toolbar">
+      <button class="btn" type="button" id="backBtn">Back</button>
       <div class="crumbs" id="crumbs"></div>
       <div class="view-toggle">
         <button type="button" id="listViewBtn" class="on">List</button>
         <button type="button" id="gridViewBtn">Grid</button>
       </div>
+      <div class="view-toggle" id="sortToggle">
+        <button type="button" data-sort="name" class="on">Name</button>
+        <button type="button" data-sort="size">Size</button>
+        <button type="button" data-sort="all">All</button>
+      </div>
+      <button class="btn primary" type="button" id="watchBtn" hidden>Watch</button>
       <button class="btn" type="button" id="mkdirBtn">New folder</button>
+    </div>
+    <div class="drop" id="drop">
+      <span>Tap here or drop files to add them to this folder</span>
       <label class="btn primary upload-btn">Upload
         <input id="fileInput" type="file" multiple>
       </label>
     </div>
-    <div class="drop" id="drop">Tap here or use Upload to add files</div>
     <div class="progress" id="progress"><div></div></div>
     <div class="xfer" id="xfer"></div>
     <div class="list" id="list"><div class="empty">Loading…</div></div>
@@ -275,6 +349,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <label>MISO<input name="miso" type="number" min="0" max="48" required></label>
         <label>MOSI<input name="mosi" type="number" min="0" max="48" required></label>
       </div>
+      <div class="hint">This board uses the SPI pins above. Typical 6-pin modules cannot do native SDMMC.</div>
       <div class="hint" id="sdHint"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn primary" type="submit">Save settings</button>
@@ -333,6 +408,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   </div>
 </dialog>
 <div class="toast" id="toast"></div>
+<div id="feed">
+  <div id="feedTrack"></div>
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -340,6 +418,11 @@ let path = "/";
 let statusData = {};
 let viewMode = localStorage.getItem("sdView") || "list";
 let joinTarget = "";
+let folderItems = [];
+let feedObserver = null;
+let feedMuted = true;
+let sortBy = localStorage.getItem("sdSort") || "name";
+let sortAsc = localStorage.getItem("sdSortAsc") !== "0";
 
 const TABS = document.querySelectorAll("nav button");
 TABS.forEach((b) => b.onclick = () => {
@@ -388,6 +471,14 @@ function setView(mode) {
   $("#list").classList.toggle("grid", mode === "grid");
 }
 
+function goBack() {
+  if (path === "/") return;
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  path = parts.length ? "/" + parts.join("/") : "/";
+  loadFiles();
+}
+
 function crumbs() {
   const el = $("#crumbs");
   el.innerHTML = "";
@@ -408,6 +499,50 @@ function crumbs() {
     cur += "/" + part;
     add(part, cur);
   });
+  const back = $("#backBtn");
+  if (back) back.disabled = path === "/";
+}
+
+function itemKind(item) {
+  if (item.dir) return 0;
+  if (isVideo(item.name)) return 1;
+  const n = item.name.toLowerCase();
+  if (/\.(png|jpg|jpeg|gif|webp|bmp)$/.test(n)) return 2;
+  if (/\.(mp3|wav|ogg)$/.test(n)) return 3;
+  return 4;
+}
+
+function sortedItems() {
+  const items = folderItems.slice();
+  const dir = sortAsc ? 1 : -1;
+  items.sort((a, b) => {
+    if (sortBy === "size") {
+      const as = a.dir ? -1 : (a.size || 0);
+      const bs = b.dir ? -1 : (b.size || 0);
+      if (as !== bs) return (as - bs) * dir;
+    } else if (sortBy === "all") {
+      const ka = itemKind(a);
+      const kb = itemKind(b);
+      if (ka !== kb) return (ka - kb) * dir;
+    }
+    return displayName(a.name).localeCompare(displayName(b.name), undefined, { numeric: true, sensitivity: "base" }) * dir;
+  });
+  return items;
+}
+
+function syncSort() {
+  document.querySelectorAll("#sortToggle [data-sort]").forEach((b) => {
+    b.classList.toggle("on", b.dataset.sort === sortBy);
+  });
+}
+
+function setSort(next) {
+  if (sortBy === next) sortAsc = !sortAsc;
+  else { sortBy = next; sortAsc = true; }
+  localStorage.setItem("sdSort", sortBy);
+  localStorage.setItem("sdSortAsc", sortAsc ? "1" : "0");
+  syncSort();
+  renderFiles();
 }
 
 function ftpUri() {
@@ -422,9 +557,149 @@ function ftpFileUrl(name) {
   return ftpUri() + "/" + parts.join("/");
 }
 
-function vlcHttpUrl(name) {
+function vlcHttpUrlIn(dir, name) {
   const ext = (name.match(/\.(mp4|m4v|webm|mkv|mov|avi)$/i) || [".mp4"])[0].toLowerCase();
-  return location.origin + "/v" + ext + "?path=" + encodeURIComponent(joinPath(path, name));
+  return location.origin + "/v" + ext + "?path=" + encodeURIComponent(joinPath(dir, name));
+}
+
+function folderVideos(items) {
+  return (items || []).filter((i) => !i.dir && isVideo(i.name));
+}
+
+function closeFeed() {
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+  $("#feedTrack").querySelectorAll("video").forEach((v) => {
+    v.pause();
+    v.removeAttribute("src");
+    v.load();
+  });
+  $("#feedTrack").innerHTML = "";
+  $("#feed").classList.remove("on");
+}
+
+function activateSlide(slide) {
+  const track = $("#feedTrack");
+  track.querySelectorAll(".feed-slide").forEach((s) => {
+    const vid = s.querySelector("video");
+    if (!vid) return;
+    if (s === slide) {
+      if (s.classList.contains("fail")) return;
+      if (!vid.getAttribute("src")) vid.src = vid.dataset.src;
+      vid.muted = feedMuted;
+      const p = vid.play();
+      if (p && p.catch) p.catch(() => {});
+    } else {
+      vid.pause();
+      if (vid.getAttribute("src")) {
+        vid.removeAttribute("src");
+        vid.load();
+      }
+    }
+  });
+  const muteBtn = slide.querySelector("[data-mute]");
+  if (muteBtn) muteBtn.textContent = feedMuted ? "Unmute" : "Mute";
+}
+
+function updateFeedProgress(slide, video) {
+  const now = slide.querySelector(".feed-progress-now");
+  const buf = slide.querySelector(".feed-progress-buf");
+  if (!now || !video.duration) return;
+  now.style.width = Math.min(100, (video.currentTime / video.duration) * 100) + "%";
+  if (buf && video.buffered.length) {
+    buf.style.width = Math.min(100, (video.buffered.end(video.buffered.length - 1) / video.duration) * 100) + "%";
+  }
+}
+
+function markFeedFail(slide, video) {
+  slide.classList.add("fail");
+  video.pause();
+}
+
+function openFeed(videos, startName, dir) {
+  if (!videos.length) {
+    toast("No videos in this folder");
+    return;
+  }
+  closeFeed();
+  const track = $("#feedTrack");
+  const start = Math.max(0, videos.findIndex((v) => v.name === startName));
+  videos.forEach((item, i) => {
+    const slide = document.createElement("div");
+    slide.className = "feed-slide";
+    const src = vlcHttpUrlIn(dir, item.name);
+    slide.innerHTML =
+      '<div class="feed-bar">' +
+        '<b>' + escapeHtml(displayName(item.name)) + '</b>' +
+        '<button class="btn" type="button" data-mute>Unmute</button>' +
+        '<button class="btn" type="button" data-close>Close</button>' +
+      '</div>' +
+      '<video playsinline webkit-playsinline loop preload="none"></video>' +
+      '<div class="feed-fail">' +
+        '<b>Unsupported video</b>' +
+        '<div class="hint">This browser cannot play this codec (often HEVC / MKV). Open it in VLC instead.</div>' +
+        '<a class="btn primary" data-vlc>Play on VLC</a>' +
+      '</div>' +
+      '<div class="feed-meta"><div>' + (i + 1) + " / " + videos.length +
+      '</div><div class="hint">Swipe up for the next video</div>' +
+      '<div class="feed-progress"><div class="feed-progress-track">' +
+      '<div class="feed-progress-buf"></div><div class="feed-progress-now"></div>' +
+      '</div></div></div>';
+    const video = slide.querySelector("video");
+    video.dataset.src = src;
+    video.muted = true;
+    slide.querySelector("[data-vlc]").href = vlcAppLink(src);
+    video.onerror = () => markFeedFail(slide, video);
+    video.onplaying = () => slide.classList.remove("fail");
+    video.ontimeupdate = () => updateFeedProgress(slide, video);
+    video.onprogress = () => updateFeedProgress(slide, video);
+    video.onclick = () => {
+      if (slide.classList.contains("fail")) return;
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    };
+    slide.querySelector(".feed-progress").onclick = (e) => {
+      e.stopPropagation();
+      if (!video.duration) return;
+      const trackEl = e.currentTarget.querySelector(".feed-progress-track");
+      const r = trackEl.getBoundingClientRect();
+      video.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * video.duration;
+    };
+    slide.querySelector("[data-mute]").onclick = (e) => {
+      e.stopPropagation();
+      feedMuted = !feedMuted;
+      video.muted = feedMuted;
+      track.querySelectorAll("[data-mute]").forEach((b) => b.textContent = feedMuted ? "Unmute" : "Mute");
+    };
+    slide.querySelector("[data-close]").onclick = (e) => { e.stopPropagation(); closeFeed(); };
+    track.appendChild(slide);
+  });
+  $("#feed").classList.add("on");
+  feedObserver = new IntersectionObserver((entries) => {
+    entries.forEach((en) => {
+      if (en.isIntersecting && en.intersectionRatio >= 0.6) activateSlide(en.target);
+    });
+  }, { root: track, threshold: [0.6] });
+  track.querySelectorAll(".feed-slide").forEach((s) => feedObserver.observe(s));
+  const first = track.children[start] || track.children[0];
+  if (first) {
+    first.scrollIntoView();
+    activateSlide(first);
+  }
+}
+
+async function watchPath(dir, startName) {
+  if (dir === path) {
+    openFeed(folderVideos(sortedItems()), startName, dir);
+    return;
+  }
+  try {
+    const r = await fetch("/api/list?path=" + encodeURIComponent(dir));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Could not list folder");
+    openFeed(folderVideos(data.items), startName, dir);
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 function drawQr(canvas, size, bits) {
@@ -509,7 +784,7 @@ async function loadStatus() {
   $("#sdUsed").textContent = ok ? (fmtSize(statusData.used) + " / " + fmtSize(statusData.total)) : "—";
   $("#clients").textContent = statusData.clients ?? 0;
   $("#sdHint").textContent = ok
-    ? ("Card type " + (statusData.cardType || "SD") + " · SPI " + ((statusData.sdHz||0)/1000000).toFixed(1) + " MHz · uptime " + Math.floor((statusData.uptime || 0)/1000) + "s · free heap " + fmtSize(statusData.heap))
+    ? ("Card type " + (statusData.cardType || "SD") + " · " + (statusData.sdBus || "SPI") + " " + ((statusData.sdHz||0)/1000000).toFixed(1) + " MHz · uptime " + Math.floor((statusData.uptime || 0)/1000) + "s · free heap " + fmtSize(statusData.heap))
     : "SD card did not mount. Check wiring, VIN/5V, and FAT32.";
   const sta = $("#staStatus");
   const sub = document.querySelector(".sub");
@@ -564,17 +839,37 @@ async function loadFiles() {
   crumbs();
   const box = $("#list");
   box.classList.toggle("grid", viewMode === "grid");
-  box.innerHTML = '<div class="empty">Loading…</div>';
+    box.innerHTML = '<div class="empty">Loading…</div>';
+    $("#watchBtn").hidden = true;
   try {
     const r = await fetch("/api/list?path=" + encodeURIComponent(path));
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Could not list files");
     if (!data.items.length) {
+      folderItems = [];
+      $("#watchBtn").hidden = true;
       box.innerHTML = '<div class="empty">This folder is empty.</div>';
       return;
     }
-    box.innerHTML = "";
-    data.items.forEach((item) => {
+    folderItems = data.items;
+    const vids = folderVideos(folderItems);
+    $("#watchBtn").hidden = vids.length === 0;
+    renderFiles();
+  } catch (e) {
+    box.innerHTML = '<div class="error">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderFiles() {
+  const box = $("#list");
+  box.classList.toggle("grid", viewMode === "grid");
+  const items = sortedItems();
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">This folder is empty.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  items.forEach((item) => {
       const row = document.createElement("div");
       row.className = "row";
       row.innerHTML = `
@@ -586,14 +881,20 @@ async function loadFiles() {
         <div class="acts"></div>`;
       const acts = row.querySelector(".acts");
       acts.onclick = (e) => e.stopPropagation();
+      if (item.dir) {
+        const watch = document.createElement("button");
+        watch.className = "btn primary";
+        watch.textContent = "Watch";
+        watch.onclick = (e) => { e.stopPropagation(); watchPath(joinPath(path, item.name)); };
+        acts.appendChild(watch);
+      } else if (isVideo(item.name)) {
+        const play = document.createElement("button");
+        play.className = "btn primary";
+        play.textContent = "Play";
+        play.onclick = (e) => { e.stopPropagation(); watchPath(path, item.name); };
+        acts.appendChild(play);
+      }
       if (!item.dir) {
-        if (isVideo(item.name)) {
-          const play = document.createElement("button");
-          play.className = "btn primary";
-          play.textContent = "Play";
-          play.onclick = (e) => { e.stopPropagation(); preview(item); };
-          acts.appendChild(play);
-        }
         const dl = document.createElement("button");
         dl.className = "btn";
         dl.textContent = "Save";
@@ -605,12 +906,13 @@ async function loadFiles() {
       del.textContent = "Delete";
       del.onclick = (e) => { e.stopPropagation(); removeItem(item); };
       acts.appendChild(del);
-      row.onclick = () => item.dir ? openDir(item.name) : preview(item);
+      row.onclick = () => {
+        if (item.dir) openDir(item.name);
+        else if (isVideo(item.name)) watchPath(path, item.name);
+        else preview(item);
+      };
       box.appendChild(row);
-    });
-  } catch (e) {
-    box.innerHTML = '<div class="error">' + escapeHtml(e.message) + '</div>';
-  }
+  });
 }
 
 function escapeHtml(s) {
@@ -682,7 +984,7 @@ async function preview(item) {
   const body = $("#previewBody");
   const n = item.name.toLowerCase();
   if (isVideo(item.name)) {
-    const http = vlcHttpUrl(item.name);
+    const http = vlcHttpUrlIn(path, item.name);
     const ftp = ftpFileUrl(item.name);
     const mime = videoMime(item.name);
     const typeAttr = mime ? ' type="' + mime + '"' : "";
@@ -784,13 +1086,24 @@ function uploadFiles(files) {
 
 $("#fileInput").onchange = (e) => { uploadFiles([...e.target.files]); e.target.value = ""; };
 const drop = $("#drop");
-drop.onclick = () => $("#fileInput").click();
+drop.onclick = (e) => {
+  if (e.target.closest(".upload-btn") || e.target.id === "fileInput") return;
+  $("#fileInput").click();
+};
 ["dragenter","dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hot"); }));
 ["dragleave","drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hot"); }));
 drop.addEventListener("drop", (e) => uploadFiles([...e.dataTransfer.files]));
 
-$("#listViewBtn").onclick = () => { setView("list"); loadFiles(); };
-$("#gridViewBtn").onclick = () => { setView("grid"); loadFiles(); };
+$("#backBtn").onclick = goBack;
+$("#listViewBtn").onclick = () => { setView("list"); renderFiles(); };
+$("#gridViewBtn").onclick = () => { setView("grid"); renderFiles(); };
+document.querySelectorAll("#sortToggle [data-sort]").forEach((b) => {
+  b.onclick = () => setSort(b.dataset.sort);
+});
+$("#watchBtn").onclick = () => watchPath(path);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#feed").classList.contains("on")) closeFeed();
+});
 $("#connectBtn").onclick = openConnect;
 $("#closeConnect").onclick = () => $("#connectDlg").close();
 $("#copyFtpBtn").onclick = () => copyText($("#ftpLink").textContent, "FTP link copied");
@@ -869,6 +1182,7 @@ $("#closePreview").onclick = () => {
 
 (async () => {
   setView(viewMode);
+  syncSort();
   await loadStatus();
   await loadSettings();
   const s = await (await fetch("/api/settings")).json();
