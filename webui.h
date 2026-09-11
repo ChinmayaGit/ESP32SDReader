@@ -390,7 +390,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <code id="vlcLink">http://192.168.4.1/media/</code>
       <button class="btn" type="button" id="copyVlcBtn">Copy</button>
     </div>
-    <div class="hint">VLC → Media → Open Network Stream. For a file, tap Play in Files and copy that file’s HTTP link.</div>
+      <div class="hint">For x265 / HEVC use VLC → Open Network Stream and paste the file’s HTTP link (not FTP). Some phones can decode HEVC over FTP and others cannot — that is the phone’s VLC, not the card.</div>
     <div class="qr-grid">
       <div class="qr-card">
         <h3>Wi-Fi</h3>
@@ -558,14 +558,33 @@ function ftpUri() {
   return "ftp://" + user + ":" + pass + "@" + host + ":21";
 }
 
-function ftpFileUrl(name) {
-  const parts = joinPath(path, name).split("/").filter(Boolean).map(encodeURIComponent);
+function ftpFileUrlIn(dir, name) {
+  const parts = joinPath(dir, name).split("/").filter(Boolean).map((p) => encodeURI(p));
   return ftpUri() + "/" + parts.join("/");
 }
 
+function ftpFileUrl(name) {
+  return ftpFileUrlIn(path, name);
+}
+
 function vlcHttpUrlIn(dir, name) {
-  const ext = (name.match(/\.(mp4|m4v|webm|mkv|mov|avi)$/i) || [".mp4"])[0].toLowerCase();
-  return location.origin + "/v" + ext + "?path=" + encodeURIComponent(joinPath(dir, name));
+  const parts = joinPath(dir, name).split("/").filter(Boolean).map(encodeURIComponent);
+  return location.origin + "/media/" + parts.join("/");
+}
+
+function openUrl(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function playHttp(dir, name) {
+  const http = vlcHttpUrlIn(dir, name);
+  const app = vlcAppLink(http);
+  openUrl(app !== http ? app : http);
 }
 
 function folderVideos(items) {
@@ -642,8 +661,9 @@ function openFeed(videos, startName, dir) {
       '<video playsinline webkit-playsinline loop preload="none"></video>' +
       '<div class="feed-fail">' +
         '<b>Unsupported video</b>' +
-        '<div class="hint">This browser cannot play this codec (often HEVC / MKV). Open it in VLC instead.</div>' +
+        '<div class="hint">This browser cannot play HEVC / x265. Use VLC. If one phone plays it and this one does not, update VLC or use HTTP Open Network Stream (not FTP).</div>' +
         '<a class="btn primary" data-vlc>Play on VLC</a>' +
+        '<a class="btn" data-vlc-ftp>VLC via FTP</a>' +
       '</div>' +
       '<div class="feed-meta"><div>' + (i + 1) + " / " + videos.length +
       '</div><div class="hint">Swipe up for the next video</div>' +
@@ -654,6 +674,7 @@ function openFeed(videos, startName, dir) {
     video.dataset.src = src;
     video.muted = true;
     slide.querySelector("[data-vlc]").href = vlcAppLink(src);
+    slide.querySelector("[data-vlc-ftp]").href = vlcAppLink(ftpFileUrlIn(dir, item.name));
     video.onerror = () => markFeedFail(slide, video);
     video.onplaying = () => slide.classList.remove("fail");
     video.ontimeupdate = () => updateFeedProgress(slide, video);
@@ -742,7 +763,7 @@ async function openConnect() {
   $("#ftpUser").textContent = statusData.ftpUser || "sd";
   $("#ftpPass").textContent = statusData.ftpPass || "sdreader1";
   $("#ftpLink").textContent = ftpUri();
-  $("#vlcLink").textContent = "http://" + ip + "/v.mp4?path=/";
+  $("#vlcLink").textContent = (location.origin || ("http://" + (statusData.staIp || ip))) + "/media/";
   if (statusData.staConnected && statusData.staIp) {
     $("#lanRow").hidden = false;
     $("#lanLink").textContent = statusData.webLan || ("http://" + statusData.staIp);
@@ -903,7 +924,7 @@ function renderFiles() {
         const play = document.createElement("button");
         play.className = "btn primary";
         play.textContent = "Play";
-        play.onclick = (e) => { e.stopPropagation(); watchPath(path, item.name); };
+        play.onclick = (e) => { e.stopPropagation(); playHttp(path, item.name); };
         acts.appendChild(play);
       }
       if (!item.dir) {
@@ -920,7 +941,7 @@ function renderFiles() {
       acts.appendChild(del);
       row.onclick = () => {
         if (item.dir) openDir(item.name);
-        else if (isVideo(item.name)) watchPath(path, item.name);
+        else if (isVideo(item.name)) playHttp(path, item.name);
         else preview(item);
       };
       box.appendChild(row);
@@ -972,15 +993,20 @@ function videoMime(name) {
   return "";
 }
 
-function vlcAppLink(http) {
+function vlcAppLink(url) {
   const ua = navigator.userAgent || "";
   if (/iPhone|iPad|iPod/i.test(ua)) {
-    return "vlc-x-callback://x-callback-url/stream?url=" + encodeURIComponent(http);
+    return "vlc-x-callback://x-callback-url/stream?url=" + encodeURIComponent(url);
   }
   if (/Android/i.test(ua)) {
-    return "intent:" + http + "#Intent;action=android.intent.action.VIEW;type=video/mp4;package=org.videolan.vlc;S.browser_fallback_url=https://play.google.com/store/apps/details?id=org.videolan.vlc;end";
+    const ftp = url.startsWith("ftp://");
+    const rest = url.replace(/^https?:\/\//, "").replace(/^ftp:\/\//, "");
+    const mime = videoMime(url) || "video/*";
+    return "intent://" + rest + "#Intent;scheme=" + (ftp ? "ftp" : "http") +
+      ";action=android.intent.action.VIEW;type=" + mime +
+      ";package=org.videolan.vlc;S.browser_fallback_url=https://play.google.com/store/apps/details?id=org.videolan.vlc;end";
   }
-  return http;
+  return url;
 }
 
 function download(name) {
@@ -1005,7 +1031,7 @@ async function preview(item) {
       '<source src="' + escapeHtml(http) + '"' + typeAttr + ">" +
       "</video>" +
       '<a class="btn primary" id="openVlcBtn">Open in VLC</a>' +
-      '<div class="hint">Stay on this ESP32 Wi-Fi. VLC → Media → Open Network Stream, then paste the HTTP link. FTP login is sd / sdreader1.</div>' +
+      '<div class="hint">x265 / HEVC often fails in the phone browser. In VLC use <b>Open Network Stream</b> and paste the HTTP link. HTTP seeking works better than FTP on some phones.</div>' +
       '<div class="link-row"><span>HTTP</span><code id="httpCopy">' + escapeHtml(http) + '</code><button class="btn" type="button" id="copyVlcHttp">Copy</button></div>' +
       '<div class="link-row"><span>FTP</span><code id="ftpCopy">' + escapeHtml(ftp) + '</code><button class="btn" type="button" id="copyVlcFtp">Copy</button></div>';
     $("#openVlcBtn").href = vlcAppLink(http);
