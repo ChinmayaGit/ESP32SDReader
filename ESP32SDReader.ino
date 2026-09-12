@@ -731,6 +731,14 @@ void serveSdFile(String path, bool download) {
   }
   if (end >= fileSize) end = fileSize - 1;
   size_t len = end - start + 1;
+  // One HTTP client at a time. A 20 MB HEVC GET blocks the next videos.
+  // Cap media slices so players re-request Range and swipe/abort can recover.
+  const size_t slice = 256 * 1024;
+  if (!download && len > slice) {
+    end = start + slice - 1;
+    len = slice;
+    ranged = true;
+  }
 
   String name = path.substring(path.lastIndexOf('/') + 1);
   if (download) {
@@ -769,7 +777,7 @@ void serveSdFile(String path, bool download) {
         stall = 0;
       } else {
         yield();
-        if (++stall > 800) break;
+        if (++stall > 80) break;
       }
     }
     if (sent < (size_t)n) break;

@@ -22,6 +22,11 @@ It is **not** USB mass storage and **not** a real NAS. Throughput is Wi-Fi + SPI
 
 Firmware tries HSPI then VSPI, and swapped MOSI/MISO, at 400 kHz first, then raises the clock.
 
+<p>
+  <img src="pics/hardware-1.jpeg" alt="ESP32 and SPI SD module on jumpers" width="320">
+  <img src="pics/hardware-2.jpg" alt="Cased ESP32 SD reader" width="320">
+</p>
+
 ## Software layout
 
 | File | Role |
@@ -111,6 +116,8 @@ Also patched in that copy:
 
 Use FileZilla or Cyberduck, passive mode, plain FTP. Finder and iOS Files are unreliable.
 
+<img src="pics/ftp.jpg" alt="FTP client listing the card at 192.168.1.29" width="320">
+
 ## Features (product)
 
 - Phone-sized file browser with list/grid and sort
@@ -121,6 +128,12 @@ Use FileZilla or Cyberduck, passive mode, plain FTP. Finder and iOS Files are un
 - Hotspot fallback when home SSID is out of range
 - mDNS `esp32-sd.local`
 - Captive-portal probes do not dump the whole UI
+
+<img src="pics/1.png" alt="Files UI" width="240">
+<img src="pics/2.png" alt="Play preview with HTTP and FTP links" width="240">
+<img src="pics/3.png" alt="Watch swipe feed" width="240">
+<img src="pics/4.png" alt="Wi-Fi settings" width="240">
+<img src="pics/5.png" alt="SPI pin settings" width="240">
 
 ## Issues we hit
 

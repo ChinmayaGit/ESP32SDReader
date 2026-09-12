@@ -4,6 +4,11 @@ Wi-Fi NAS for a microSD card. Flash an ESP32, plug in a FAT32 card, and browse, 
 
 The web page lives in ESP32 flash, so the site still opens if the card is missing. You can fix wiring from Settings.
 
+<p align="center">
+  <img src="pics/hardware-1.jpeg" alt="ESP32 DevKit wired to a SPI microSD module" width="360">
+  <img src="pics/hardware-2.jpg" alt="Assembled ESP32 SD reader in a case, powered over USB" width="360">
+</p>
+
 ## What you need
 
 - ESP32 DevKit (ESP32-D0WDQ6 or similar)
@@ -65,6 +70,20 @@ You can also try **http://esp32-sd.local** (mDNS; often fails on Android).
 - FTP server for FileZilla / Cyberduck
 - HTTP byte-range streaming for VLC
 
+### Web UI
+
+Files page — browse, sort (**All** is the default), upload, Play / Save / Delete:
+
+<img src="pics/1.png" alt="Files page with list of videos and Play Save Delete" width="360">
+
+Tap a video for the in-page player plus HTTP / FTP / Open in VLC links:
+
+<img src="pics/2.png" alt="Video preview with Open in VLC and copyable HTTP and FTP links" width="360">
+
+**Watch** (toolbar only) is the swipe feed:
+
+<img src="pics/3.png" alt="Watch mode vertical video feed" width="360">
+
 ## Home Wi-Fi
 
 Settings → scan → pick your network → **Hotspot + join Wi-Fi**.
@@ -111,12 +130,17 @@ Use **FileZilla** or **Cyberduck**. Close the web page first (the ESP32 only han
 
 macOS Finder and the iOS Files app often show an empty folder. Do not use them.
 
+<img src="pics/ftp.jpg" alt="Phone FTP client listing the SD card at 192.168.1.29" width="360">
+
 ## Settings you can change
 
 - Hotspot name and password
 - Wi-Fi mode and home network
 - SPI pins (ESP32 DevKit, ESP32-S3 preset, or custom)
 - Remount SD / reboot
+
+<img src="pics/4.png" alt="Settings: hotspot plus join home Wi-Fi" width="360">
+<img src="pics/5.png" alt="Settings: SPI pins CS 5 SCK 18 MISO 19 MOSI 23" width="360">
 
 ## Default credentials
 

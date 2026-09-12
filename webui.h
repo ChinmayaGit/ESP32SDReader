@@ -284,9 +284,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <button type="button" id="gridViewBtn">Grid</button>
       </div>
       <div class="view-toggle" id="sortToggle">
-        <button type="button" data-sort="name" class="on">Name</button>
+        <button type="button" data-sort="all" class="on">All</button>
+        <button type="button" data-sort="name">Name</button>
         <button type="button" data-sort="size">Size</button>
-        <button type="button" data-sort="all">All</button>
       </div>
       <button class="btn primary" type="button" id="watchBtn" hidden>Watch</button>
       <button class="btn" type="button" id="mkdirBtn">New folder</button>
@@ -427,7 +427,7 @@ let joinTarget = "";
 let folderItems = [];
 let feedObserver = null;
 let feedMuted = true;
-let sortBy = localStorage.getItem("sdSort") || "name";
+let sortBy = localStorage.getItem("sdSort") || "all";
 let sortAsc = localStorage.getItem("sdSortAsc") !== "0";
 
 const TABS = document.querySelectorAll("nav button");
@@ -609,10 +609,18 @@ function activateSlide(slide) {
     if (!vid) return;
     if (s === slide) {
       if (s.classList.contains("fail")) return;
-      if (!vid.getAttribute("src")) vid.src = vid.dataset.src;
-      vid.muted = feedMuted;
-      const p = vid.play();
-      if (p && p.catch) p.catch(() => {});
+      if (!vid.getAttribute("src")) {
+        setTimeout(() => {
+          if (!vid.getAttribute("src")) vid.src = vid.dataset.src;
+          vid.muted = feedMuted;
+          const p = vid.play();
+          if (p && p.catch) p.catch(() => {});
+        }, 120);
+      } else {
+        vid.muted = feedMuted;
+        const p = vid.play();
+        if (p && p.catch) p.catch(() => {});
+      }
     } else {
       vid.pause();
       if (vid.getAttribute("src")) {
@@ -924,7 +932,7 @@ function renderFiles() {
         const play = document.createElement("button");
         play.className = "btn primary";
         play.textContent = "Play";
-        play.onclick = (e) => { e.stopPropagation(); playHttp(path, item.name); };
+        play.onclick = (e) => { e.stopPropagation(); preview(item); };
         acts.appendChild(play);
       }
       if (!item.dir) {
@@ -941,7 +949,6 @@ function renderFiles() {
       acts.appendChild(del);
       row.onclick = () => {
         if (item.dir) openDir(item.name);
-        else if (isVideo(item.name)) playHttp(path, item.name);
         else preview(item);
       };
       box.appendChild(row);
@@ -1027,7 +1034,7 @@ async function preview(item) {
     const mime = videoMime(item.name);
     const typeAttr = mime ? ' type="' + mime + '"' : "";
     body.innerHTML =
-      '<video id="player" controls playsinline webkit-playsinline preload="metadata">' +
+      '<video id="player" controls playsinline webkit-playsinline preload="none">' +
       '<source src="' + escapeHtml(http) + '"' + typeAttr + ">" +
       "</video>" +
       '<a class="btn primary" id="openVlcBtn">Open in VLC</a>' +
