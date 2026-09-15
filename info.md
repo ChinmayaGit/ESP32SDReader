@@ -129,11 +129,15 @@ Use FileZilla or Cyberduck, passive mode, plain FTP. Finder and iOS Files are un
 - mDNS `esp32-sd.local`
 - Captive-portal probes do not dump the whole UI
 
-<img src="pics/1.png" alt="Files UI" width="240">
-<img src="pics/2.png" alt="Play preview with HTTP and FTP links" width="240">
-<img src="pics/3.png" alt="Watch swipe feed" width="240">
-<img src="pics/4.png" alt="Wi-Fi settings" width="240">
-<img src="pics/5.png" alt="SPI pin settings" width="240">
+<p>
+  <img src="pics/1.png" alt="Files UI" width="32%">
+  <img src="pics/2.png" alt="Play preview with HTTP and FTP links" width="32%">
+  <img src="pics/3.png" alt="Watch swipe feed" width="32%">
+</p>
+<p>
+  <img src="pics/4.png" alt="Wi-Fi settings" width="48%">
+  <img src="pics/5.png" alt="SPI pin settings" width="48%">
+</p>
 
 ## Issues we hit
 

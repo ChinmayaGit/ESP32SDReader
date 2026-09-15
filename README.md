@@ -72,17 +72,13 @@ You can also try **http://esp32-sd.local** (mDNS; often fails on Android).
 
 ### Web UI
 
-Files page — browse, sort (**All** is the default), upload, Play / Save / Delete:
+Files, Play preview (HTTP / FTP / VLC), and Watch swipe feed:
 
-<img src="pics/1.png" alt="Files page with list of videos and Play Save Delete" width="360">
-
-Tap a video for the in-page player plus HTTP / FTP / Open in VLC links:
-
-<img src="pics/2.png" alt="Video preview with Open in VLC and copyable HTTP and FTP links" width="360">
-
-**Watch** (toolbar only) is the swipe feed:
-
-<img src="pics/3.png" alt="Watch mode vertical video feed" width="360">
+<p>
+  <img src="pics/1.png" alt="Files page with list of videos and Play Save Delete" width="32%">
+  <img src="pics/2.png" alt="Video preview with Open in VLC and copyable HTTP and FTP links" width="32%">
+  <img src="pics/3.png" alt="Watch mode vertical video feed" width="32%">
+</p>
 
 ## Home Wi-Fi
 
@@ -139,8 +135,10 @@ macOS Finder and the iOS Files app often show an empty folder. Do not use them.
 - SPI pins (ESP32 DevKit, ESP32-S3 preset, or custom)
 - Remount SD / reboot
 
-<img src="pics/4.png" alt="Settings: hotspot plus join home Wi-Fi" width="360">
-<img src="pics/5.png" alt="Settings: SPI pins CS 5 SCK 18 MISO 19 MOSI 23" width="360">
+<p>
+  <img src="pics/4.png" alt="Settings: hotspot plus join home Wi-Fi" width="48%">
+  <img src="pics/5.png" alt="Settings: SPI pins CS 5 SCK 18 MISO 19 MOSI 23" width="48%">
+</p>
 
 ## Default credentials
 
